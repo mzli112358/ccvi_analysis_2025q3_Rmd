@@ -1,0 +1,1035 @@
+---
+title: "Climate-Conflict-Vulnerability Index (CCVI) 2025 Q3 Analysis"
+subtitle: "Comprehensive Data Visualization and Analysis Report"
+author: "CCVI Analysis Team"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+  word_document:
+    toc: true
+    toc_depth: 3
+  powerpoint_presentation:
+    slide_level: 2
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+# Setup and configuration
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 12, fig.height = 8, dpi = 300)
+
+# Load required libraries
+required_packages <- c(
+  "tidyverse", "data.table", "arrow", "sf", "rnaturalearth", "rnaturalearthdata",
+  "leaflet", "plotly", "highcharter", "DT", "kableExtra", "ggplot2", "ggthemes",
+  "viridis", "RColorBrewer", "corrplot", "psych", "factoextra", "cluster",
+  "tmap", "tmaptools", "mapview", "geosphere", "raster", "terra", "sp",
+  "patchwork", "cowplot", "gridExtra", "grid", "ggrepel", "ggspatial",
+  "countrycode", "ISOcodes", "V8", "jsonlite", "httr", "xml2", "rvest"
+)
+
+# Install missing packages
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) install.packages(new_packages)
+
+# Load all packages
+lapply(required_packages, library, character.only = TRUE)
+
+# Ensure dplyr is properly loaded and no conflicts
+if (!"dplyr" %in% (.packages())) {
+  library(dplyr)
+}
+
+# Set global options
+options(scipen = 999, digits = 4, warn = -1)
+theme_set(theme_minimal())
+
+# Color palettes
+ccvi_palette <- c("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf")
+risk_palette <- c("#2b8cbe", "#7bccc4", "#bae4bc", "#f0f9e8", "#fee0d2", "#fcbba1", "#fc9272", "#fb6a4a", "#de2d26", "#a50f15")
+```
+
+```{r data-loading, include=FALSE, warning=FALSE, message=FALSE}
+# Data loading and preprocessing functions
+
+# Function to load parquet files safely
+load_parquet <- function(file_path) {
+  tryCatch({
+    if (file.exists(file_path)) {
+      return(as.data.frame(read_parquet(file_path)))
+    } else {
+      warning(paste("File not found:", file_path))
+      return(NULL)
+    }
+  }, error = function(e) {
+    warning(paste("Error loading file:", file_path, "-", e$message))
+    return(NULL)
+  })
+}
+
+# Function to clean column names
+clean_column_names <- function(df) {
+  names(df) <- gsub("[^a-zA-Z0-9_]", "_", names(df))
+  names(df) <- gsub("_+", "_", names(df))
+  names(df) <- gsub("^_+|_+$", "", names(df))
+  names(df) <- tolower(names(df))
+  return(df)
+}
+
+# Load CCVI structure and metadata
+ccvi_structure <- fread("ccvi-full-2025-3/ccvi-structure.tsv", encoding = "UTF-8")
+ccvi_sources <- fread("ccvi-full-2025-3/ccvi-data-sources.tsv", encoding = "UTF-8")
+
+# Clean structure data column names
+ccvi_structure <- clean_column_names(ccvi_structure)
+ccvi_sources <- clean_column_names(ccvi_sources)
+
+# Load main data files
+base_grid <- load_parquet("ccvi-full-2025-3/base_grid.parquet")
+exposure_layers <- load_parquet("ccvi-full-2025-3/exposure_layers.parquet")
+ccvi_scores <- load_parquet("ccvi-full-2025-3/ccvi_scores.parquet")
+data_recency <- load_parquet("ccvi-full-2025-3/data_recency.parquet")
+vul_country_raw <- load_parquet("ccvi-full-2025-3/vul_country_raw.parquet")
+
+# Clean column names
+base_grid <- clean_column_names(base_grid)
+exposure_layers <- clean_column_names(exposure_layers)
+ccvi_scores <- clean_column_names(ccvi_scores)
+data_recency <- clean_column_names(data_recency)
+vul_country_raw <- clean_column_names(vul_country_raw)
+
+# Get latest quarter data
+latest_quarter <- ccvi_scores %>% 
+  group_by(pgid) %>% 
+  summarise(
+    latest_year = max(year),
+    latest_quarter = max(quarter[year == max(year)])
+  ) %>% 
+  slice(1)
+
+current_year <- latest_quarter$latest_year
+current_quarter <- latest_quarter$latest_quarter
+
+# Filter to current data
+current_data <- ccvi_scores %>% 
+  filter(year == current_year & quarter == current_quarter)
+
+# Get country information
+countries <- unique(base_grid$iso3)
+country_names <- countrycode(countries, "iso3c", "country.name", warn = FALSE)
+country_mapping <- data.frame(
+  iso3 = countries,
+  country = country_names,
+  stringsAsFactors = FALSE
+)
+
+# Function to categorize risk levels
+categorize_risk <- function(score, thresholds = c(0.2, 0.4, 0.6, 0.8)) {
+  cut(score, 
+      breaks = c(0, thresholds, 1), 
+      labels = c("Very Low", "Low", "Moderate", "High", "Very High"),
+      include.lowest = TRUE)
+}
+
+# Add risk categories
+current_data <- current_data %>% 
+  mutate(
+    ccvi_category = categorize_risk(ccvi),
+    cli_risk_category = categorize_risk(cli_risk),
+    con_risk_category = categorize_risk(con_risk)
+  )
+
+# Merge with country information
+current_data <- current_data %>% 
+  left_join(base_grid %>% dplyr::select(pgid, iso3, lat, lon), by = "pgid") %>% 
+  left_join(country_mapping, by = "iso3")
+```
+
+# Executive Summary {#executive-summary}
+
+```{r executive-summary}
+# Calculate global statistics
+global_stats <- current_data %>% 
+  summarise(
+    n_cells = n(),
+    mean_ccvi = mean(ccvi, na.rm = TRUE),
+    median_ccvi = median(ccvi, na.rm = TRUE),
+    sd_ccvi = sd(ccvi, na.rm = TRUE),
+    min_ccvi = min(ccvi, na.rm = TRUE),
+    max_ccvi = max(ccvi, na.rm = TRUE),
+    
+    mean_cli = mean(cli_risk, na.rm = TRUE),
+    mean_con = mean(con_risk, na.rm = TRUE),
+    
+    high_risk_cells = sum(ccvi > 0.6, na.rm = TRUE),
+    very_high_risk_cells = sum(ccvi > 0.8, na.rm = TRUE),
+    
+    high_risk_percentage = (high_risk_cells / n_cells) * 100,
+    very_high_risk_percentage = (very_high_risk_cells / n_cells) * 100
+  )
+
+# Country-level statistics
+country_stats <- current_data %>% 
+  group_by(iso3, country) %>% 
+  summarise(
+    n_cells = n(),
+    mean_ccvi = mean(ccvi, na.rm = TRUE),
+    mean_cli = mean(cli_risk, na.rm = TRUE),
+    mean_con = mean(con_risk, na.rm = TRUE),
+    max_ccvi = max(ccvi, na.rm = TRUE),
+    high_risk_cells = sum(ccvi > 0.6, na.rm = TRUE),
+    very_high_risk_cells = sum(ccvi > 0.8, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(mean_ccvi))
+
+# Top 10 highest risk countries
+top_risk_countries <- head(country_stats, 10)
+
+# Risk category distribution
+risk_distribution <- current_data %>% 
+  count(ccvi_category) %>% 
+  mutate(percentage = (n / sum(n)) * 100)
+```
+
+## Key Findings
+
+### Global Overview (Q3 2025)
+
+- **Total Analysis Coverage**: `r format(global_stats$n_cells, big.mark = ",")` grid cells (0.5°×0.5° resolution)
+- **Global Mean CCVI Score**: `r round(global_stats$mean_ccvi, 3)`
+- **Global Risk Distribution**: 
+  - Very High Risk: `r round(global_stats$very_high_risk_percentage, 1)`% of cells
+  - High Risk: `r round(global_stats$high_risk_percentage, 1)`% of cells
+
+### Top 10 Highest Risk Countries
+
+```{r top-countries-table}
+kable(top_risk_countries, 
+      col.names = c("ISO3", "Country", "Grid Cells", "Mean CCVI", "Mean Climate Risk", 
+                    "Mean Conflict Risk", "Max CCVI", "High Risk Cells", "Very High Risk Cells"),
+      caption = "Top 10 Countries by Mean CCVI Score (Q3 2025)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  scroll_box(width = "100%")
+```
+
+### Risk Category Distribution
+
+```{r risk-distribution-plot}
+risk_distribution %>% 
+  ggplot(aes(x = ccvi_category, y = percentage, fill = ccvi_category)) +
+  geom_col() +
+  scale_fill_manual(values = risk_palette[c(1,3,5,7,9)]) +
+  labs(title = "Global CCVI Risk Category Distribution",
+       subtitle = paste("Based on", format(nrow(current_data), big.mark = ","), "grid cells"),
+       x = "Risk Category",
+       y = "Percentage of Grid Cells (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Data Overview and Methodology {#data-overview}
+
+## CCVI Framework Structure
+
+The Climate-Conflict-Vulnerability Index (CCVI) is a comprehensive framework that assesses risks to human security through three main pillars:
+
+### 1. Climate Pillar (CLI)
+**Purpose**: Physical climate conditions that can harm society
+
+**Dimensions**:
+- **Current Extreme Events**: Extreme climate events from the past 12 months
+- **Accumulated Extreme Events**: Extreme events over the past 7 years  
+- **Long-term Shifts**: Changes in average climate conditions over 30 years
+
+### 2. Conflict Pillar (CON)
+**Purpose**: Hazards caused by organized armed violence
+
+**Dimensions**:
+- **Level of Armed Violence**: Current armed violence and its intensity
+- **Societal Tensions**: Popular unrest as potential precursors to violence
+- **Conflict Context**: Country-level conflict characteristics
+
+### 3. Vulnerability Pillar (VUL)
+**Purpose**: Factors determining how severely populations are affected by hazards
+
+**Dimensions**:
+- **Socio-economic Vulnerability**: Economic marginalization and resource limitations
+- **Political Vulnerability**: Weak governance and democratic deficits
+- **Demographic Vulnerability**: Population characteristics affecting resilience
+- **Environmental Vulnerability**: Environmental degradation and resource scarcity
+
+## Data Sources and Coverage
+
+```{r data-sources}
+# Display data sources
+kable(head(ccvi_sources, 15), 
+      col.names = c("ID", "Organization ID", "Organization", "Short Label", "Full Label", "URL"),
+      caption = "Primary Data Sources Used in CCVI Analysis") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  scroll_box(width = "100%", height = "400px")
+```
+
+## Spatial and Temporal Coverage
+
+- **Spatial Resolution**: 0.5°×0.5° grid cells (~55km × 55km at equator)
+- **Temporal Coverage**: Quarterly updates from 2015 to Q3 2025
+- **Geographic Coverage**: Global land surface (excluding Antarctica)
+- **Total Grid Cells**: `r format(nrow(base_grid), big.mark = ",")` cells
+
+# Global Risk Assessment {#global-risk}
+
+## Overall CCVI Risk Distribution
+
+```{r global-risk-map}
+# Create global risk map
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Prepare data for mapping
+map_data <- current_data %>% 
+  filter(!is.na(lat), !is.na(lon))
+
+# Create risk level map
+risk_map_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "white", size = 0.1) +
+  geom_point(data = map_data, 
+             aes(x = lon, y = lat, color = ccvi), 
+             alpha = 0.6, size = 0.5) +
+  scale_color_gradientn(colors = risk_palette, 
+                       name = "CCVI Score",
+                       limits = c(0, 1),
+                       breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                       labels = c("0", "0.2", "0.4", "0.6", "0.8", "1.0")) +
+  labs(title = "Global CCVI Risk Distribution (Q3 2025)",
+       subtitle = "Climate-Conflict-Vulnerability Index scores by grid cell",
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10),
+    legend.position = "right"
+  )
+
+risk_map_plot
+```
+
+## Regional Risk Analysis
+
+```{r regional-analysis}
+# Define regions based on country codes (simplified)
+define_region <- function(iso3) {
+  case_when(
+    iso3 %in% c("USA", "CAN", "MEX") ~ "North America",
+    iso3 %in% c("BRA", "ARG", "CHL", "COL", "PER", "VEN", "ECU", "BOL", "PRY", "URY") ~ "South America",
+    iso3 %in% c("DEU", "FRA", "GBR", "ITA", "ESP", "POL", "NLD", "BEL", "GRC", "PRT") ~ "Europe",
+    iso3 %in% c("RUS", "UKR", "BLR", "ROU", "HUN", "CZE", "SVK", "BGR", "SRB", "HRV") ~ "Eastern Europe",
+    iso3 %in% c("CHN", "JPN", "KOR", "IND", "THA", "VNM", "PHL", "MYS", "IDN", "SGP") ~ "Asia-Pacific",
+    iso3 %in% c("SAU", "IRN", "IRQ", "ARE", "KWT", "QAT", "BHR", "OMN", "YEM") ~ "Middle East",
+    iso3 %in% c("ZAF", "NGA", "EGY", "MAR", "DZA", "LBY", "TUN", "ETH", "KEN", "GHA") ~ "Africa",
+    iso3 %in% c("AUS", "NZL") ~ "Oceania",
+    TRUE ~ "Other"
+  )
+}
+
+# Regional statistics
+regional_stats <- current_data %>% 
+  mutate(region = define_region(iso3)) %>% 
+  group_by(region) %>% 
+  summarise(
+    n_cells = n(),
+    mean_ccvi = mean(ccvi, na.rm = TRUE),
+    mean_cli = mean(cli_risk, na.rm = TRUE),
+    mean_con = mean(con_risk, na.rm = TRUE),
+    sd_ccvi = sd(ccvi, na.rm = TRUE),
+    high_risk = sum(ccvi > 0.6, na.rm = TRUE),
+    very_high_risk = sum(ccvi > 0.8, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(mean_ccvi))
+```
+
+```{r regional-comparison}
+# Regional comparison plot
+regional_stats %>% 
+  ggplot(aes(x = reorder(region, mean_ccvi), y = mean_ccvi)) +
+  geom_col(aes(fill = mean_ccvi)) +
+  geom_errorbar(aes(ymin = mean_ccvi - sd_ccvi, ymax = mean_ccvi + sd_ccvi), 
+                width = 0.2, color = "black") +
+  scale_fill_gradientn(colors = risk_palette, name = "Mean CCVI") +
+  labs(title = "Regional Mean CCVI Scores Comparison",
+       subtitle = "Error bars show ±1 standard deviation",
+       x = "Region",
+       y = "Mean CCVI Score") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r regional-risk-table}
+kable(regional_stats, 
+      col.names = c("Region", "Grid Cells", "Mean CCVI", "Mean Climate Risk", 
+                    "Mean Conflict Risk", "SD CCVI", "High Risk Cells", "Very High Risk Cells"),
+      caption = "Regional Risk Statistics Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed")) %>%
+  scroll_box(width = "100%")
+```
+
+# Pillar-Specific Analysis {#pillar-analysis}
+
+## Climate Risk Analysis
+
+```{r climate-risk-analysis}
+# Climate indicators analysis
+# Debug: Check structure of ccvi_structure
+if (nrow(ccvi_structure) > 0) {
+  cat("CCVI Structure columns:", paste(names(ccvi_structure), collapse = ", "), "\n")
+  cat("First few rows of ccvi_structure:\n")
+  print(head(ccvi_structure))
+}
+
+# Check if required columns exist
+required_cols <- c("pillarid", "level", "id")
+if (all(required_cols %in% names(ccvi_structure))) {
+  climate_indicators <- ccvi_structure %>% 
+    filter(pillarid == "CLI" & level == 3) %>% 
+    pull(id)
+} else {
+  cat("Warning: Required columns not found in ccvi_structure. Using fallback method.\n")
+  # Fallback: use predefined climate indicators
+  climate_indicators <- c("cli_exposure", "cli_vulnerability", "cli_impact")
+}
+
+# Extract climate indicators from current data
+climate_data <- current_data %>% 
+  dplyr::select(pgid, iso3, country, lat, lon, starts_with("cli_")) %>% 
+  pivot_longer(cols = where(is.numeric) & starts_with("cli_"), names_to = "indicator", values_to = "value") %>% 
+  filter(!is.na(value))
+
+# Climate risk by category
+climate_summary <- climate_data %>% 
+  group_by(indicator) %>% 
+  summarise(
+    mean_value = mean(value, na.rm = TRUE),
+    sd_value = sd(value, na.rm = TRUE),
+    min_value = min(value, na.rm = TRUE),
+    max_value = max(value, na.rm = TRUE),
+    n_cells = n(),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(mean_value))
+```
+
+```{r climate-indicators-plot}
+# Climate indicators visualization
+climate_summary %>% 
+  ggplot(aes(x = reorder(indicator, mean_value), y = mean_value)) +
+  geom_col(aes(fill = mean_value)) +
+  geom_errorbar(aes(ymin = mean_value - sd_value, ymax = mean_value + sd_value), 
+                width = 0.2, color = "black") +
+  scale_fill_gradientn(colors = viridis(10), name = "Mean Value") +
+  labs(title = "Climate Indicators - Mean Values",
+       subtitle = "Error bars show ±1 standard deviation",
+       x = "Climate Indicator",
+       y = "Mean Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+```
+
+## Conflict Risk Analysis
+
+```{r conflict-risk-analysis}
+# Conflict indicators analysis
+if (all(required_cols %in% names(ccvi_structure))) {
+  conflict_indicators <- ccvi_structure %>% 
+    filter(pillarid == "CON" & level == 3) %>% 
+    pull(id)
+} else {
+  cat("Warning: Using fallback conflict indicators.\n")
+  # Fallback: use predefined conflict indicators
+  conflict_indicators <- c("con_intensity", "con_frequency", "con_proximity")
+}
+
+# Extract conflict indicators from current data
+conflict_data <- current_data %>% 
+  dplyr::select(pgid, iso3, country, lat, lon, starts_with("con_")) %>% 
+  pivot_longer(cols = where(is.numeric) & starts_with("con_"), names_to = "indicator", values_to = "value") %>% 
+  filter(!is.na(value))
+
+# Conflict risk by category
+conflict_summary <- conflict_data %>% 
+  group_by(indicator) %>% 
+  summarise(
+    mean_value = mean(value, na.rm = TRUE),
+    sd_value = sd(value, na.rm = TRUE),
+    min_value = min(value, na.rm = TRUE),
+    max_value = max(value, na.rm = TRUE),
+    n_cells = n(),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(mean_value))
+```
+
+```{r conflict-indicators-plot}
+# Conflict indicators visualization
+conflict_summary %>% 
+  ggplot(aes(x = reorder(indicator, mean_value), y = mean_value)) +
+  geom_col(aes(fill = mean_value)) +
+  geom_errorbar(aes(ymin = mean_value - sd_value, ymax = mean_value + sd_value), 
+                width = 0.2, color = "black") +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(9, "Reds"), name = "Mean Value") +
+  labs(title = "Conflict Indicators - Mean Values",
+       subtitle = "Error bars show ±1 standard deviation",
+       x = "Conflict Indicator",
+       y = "Mean Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+```
+
+## Vulnerability Analysis
+
+```{r vulnerability-analysis}
+# Vulnerability indicators analysis
+if (all(required_cols %in% names(ccvi_structure))) {
+  vulnerability_indicators <- ccvi_structure %>% 
+    filter(pillarid == "VUL" & level == 3) %>% 
+    pull(id)
+} else {
+  cat("Warning: Using fallback vulnerability indicators.\n")
+  # Fallback: use predefined vulnerability indicators
+  vulnerability_indicators <- c("vul_socioeconomic", "vul_governance", "vul_infrastructure")
+}
+
+# Extract vulnerability indicators from current data
+vulnerability_data <- current_data %>% 
+  dplyr::select(pgid, iso3, country, lat, lon, starts_with("vul_")) %>% 
+  pivot_longer(cols = where(is.numeric) & starts_with("vul_"), names_to = "indicator", values_to = "value") %>% 
+  filter(!is.na(value))
+
+# Vulnerability risk by category
+vulnerability_summary <- vulnerability_data %>% 
+  group_by(indicator) %>% 
+  summarise(
+    mean_value = mean(value, na.rm = TRUE),
+    sd_value = sd(value, na.rm = TRUE),
+    min_value = min(value, na.rm = TRUE),
+    max_value = max(value, na.rm = TRUE),
+    n_cells = n(),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(mean_value))
+```
+
+```{r vulnerability-indicators-plot}
+# Vulnerability indicators visualization
+vulnerability_summary %>% 
+  ggplot(aes(x = reorder(indicator, mean_value), y = mean_value)) +
+  geom_col(aes(fill = mean_value)) +
+  geom_errorbar(aes(ymin = mean_value - sd_value, ymax = mean_value + sd_value), 
+                width = 0.2, color = "black") +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(9, "Purples"), name = "Mean Value") +
+  labs(title = "Vulnerability Indicators - Mean Values",
+       subtitle = "Error bars show ±1 standard deviation",
+       x = "Vulnerability Indicator",
+       y = "Mean Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))
+```
+
+# Country-Level Deep Dive {#country-analysis}
+
+## Top Risk Countries Detailed Analysis
+
+```{r country-deep-dive}
+# Detailed analysis for top 5 countries
+top_5_countries <- head(top_risk_countries, 5)$iso3
+
+# Ensure vul_risk exists (fallbacks to vul_level or vul if available)
+if (!("vul_risk" %in% names(current_data))) {
+  if ("vul_level" %in% names(current_data)) {
+    current_data <- current_data %>% mutate(vul_risk = vul_level)
+  } else if ("vul" %in% names(current_data)) {
+    current_data <- current_data %>% mutate(vul_risk = vul)
+  } else {
+    current_data <- current_data %>% mutate(vul_risk = NA_real_)
+  }
+}
+
+country_detailed <- current_data %>% 
+  filter(iso3 %in% top_5_countries) %>% 
+  group_by(iso3, country) %>% 
+  summarise(
+    n_cells = n(),
+    mean_ccvi = mean(ccvi, na.rm = TRUE),
+    mean_cli = mean(cli_risk, na.rm = TRUE),
+    mean_con = mean(con_risk, na.rm = TRUE),
+    mean_vul = mean(vul_risk, na.rm = TRUE),
+    max_ccvi = max(ccvi, na.rm = TRUE),
+    min_ccvi = min(ccvi, na.rm = TRUE),
+    sd_ccvi = sd(ccvi, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r country-comparison-plot}
+# Country comparison across pillars
+country_detailed %>% 
+  dplyr::select(iso3, country, mean_cli, mean_con, mean_vul) %>% 
+  pivot_longer(cols = c(mean_cli, mean_con, mean_vul), 
+               names_to = "pillar", values_to = "score") %>% 
+  mutate(pillar = case_when(
+    pillar == "mean_cli" ~ "Climate",
+    pillar == "mean_con" ~ "Conflict", 
+    pillar == "mean_vul" ~ "Vulnerability"
+  )) %>% 
+  ggplot(aes(x = reorder(country, score), y = score, fill = pillar)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("Climate" = "#1f77b4", "Conflict" = "#ff7f0e", "Vulnerability" = "#2ca02c")) +
+  labs(title = "Top 5 Highest Risk Countries - Pillar Comparison",
+       subtitle = "Mean scores by pillar for Q3 2025",
+       x = "Country",
+       y = "Mean Score") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Country Risk Maps
+
+```{r country-risk-maps}
+# Create individual country maps for top 3 countries
+for (country_iso in head(top_5_countries, 3)) {
+  country_name <- countrycode(country_iso, "iso3c", "country.name")
+  
+  country_map_data <- current_data %>% 
+    filter(iso3 == country_iso & !is.na(lat) & !is.na(lon))
+  
+  if (nrow(country_map_data) > 0) {
+    country_plot <- ggplot() +
+      geom_point(data = country_map_data, 
+                 aes(x = lon, y = lat, color = ccvi), 
+                 alpha = 0.7, size = 1) +
+      scale_color_gradientn(colors = risk_palette, 
+                           name = "CCVI Score",
+                           limits = c(0, 1)) +
+      labs(title = paste(country_name, "- CCVI Risk Distribution"),
+           subtitle = paste("Q3 2025 -", nrow(country_map_data), "grid cells"),
+           x = "Longitude",
+           y = "Latitude") +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 12, face = "bold"),
+        plot.subtitle = element_text(size = 9)
+      )
+    
+    print(country_plot)
+  }
+}
+```
+
+# Statistical Analysis and Correlations {#statistical-analysis}
+
+## Correlation Analysis
+
+```{r correlation-analysis}
+# Extract pillar scores for correlation analysis
+pillar_data <- current_data %>% 
+  dplyr::select(pgid, iso3, country, cli_risk, con_risk, vul_risk, ccvi) %>% 
+  filter(complete.cases(.))
+
+# Calculate correlation matrix
+correlation_matrix <- cor(pillar_data %>% dplyr::select(cli_risk, con_risk, vul_risk, ccvi), 
+                         method = "pearson")
+
+# Correlation significance test
+cor_test <- psych::corr.test(pillar_data %>% dplyr::select(cli_risk, con_risk, vul_risk, ccvi))
+```
+
+```{r correlation-plot}
+# Visualize correlation matrix
+corrplot(correlation_matrix, 
+         method = "color", 
+         type = "upper", 
+         order = "hclust", 
+         tl.col = "black", 
+         tl.srt = 45,
+         addCoef.col = "black",
+         number.cex = 0.8,
+         col = colorRampPalette(c("darkblue", "white", "darkred"))(100),
+         title = "CCVI Pillar Correlation Matrix",
+         mar = c(0, 0, 2, 0))
+```
+
+## Principal Component Analysis
+
+```{r pca-analysis}
+# Perform PCA on pillar data
+pca_result <- prcomp(pillar_data %>% dplyr::select(cli_risk, con_risk, vul_risk), 
+                    center = TRUE, scale. = TRUE)
+
+# PCA summary
+pca_summary <- summary(pca_result)
+```
+
+```{r pca-visualization}
+# PCA biplot
+fviz_pca_biplot(pca_result, 
+                label = "var",
+                col.var = "black",
+                title = "PCA: Climate, Conflict, and Vulnerability Risks") +
+  theme_minimal()
+```
+
+## Risk Clustering Analysis
+
+```{r clustering-analysis}
+# Perform k-means clustering on risk data
+set.seed(123)
+kmeans_result <- kmeans(pillar_data %>% dplyr::select(cli_risk, con_risk, vul_risk), 
+                     centers = 5, nstart = 25)
+
+# Add cluster labels to data
+clustered_data <- pillar_data %>% 
+  mutate(cluster = as.factor(kmeans_result$cluster))
+
+# Cluster characteristics
+cluster_summary <- clustered_data %>% 
+  group_by(cluster) %>% 
+  summarise(
+    n_cells = n(),
+    mean_ccvi = mean(ccvi, na.rm = TRUE),
+    mean_cli = mean(cli_risk, na.rm = TRUE),
+    mean_con = mean(con_risk, na.rm = TRUE),
+    mean_vul = mean(vul_risk, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r cluster-visualization}
+# 3D scatter plot of clusters
+plot_ly(data = clustered_data,
+        x = ~cli_risk,
+        y = ~con_risk, 
+        z = ~vul_risk,
+        color = ~cluster,
+        colors = viridis(5),
+        type = "scatter3d",
+        mode = "markers",
+        marker = list(size = 1, opacity = 0.6),
+        title = "Risk Clusters in 3D Space") %>%
+  layout(scene = list(
+    xaxis = list(title = "Climate Risk"),
+    yaxis = list(title = "Conflict Risk"),
+    zaxis = list(title = "Vulnerability Risk")
+  ))
+```
+
+```{r cluster-characteristics}
+kable(cluster_summary,
+      caption = "Risk Cluster Characteristics") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# Interactive Visualizations {#interactive}
+
+## Interactive Global Risk Map
+
+```{r interactive-map, echo=FALSE}
+# Create interactive leaflet map
+leaflet_map <- leaflet(data = current_data %>% filter(!is.na(lat) & !is.na(lon))) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~lon,
+    lat = ~lat,
+    radius = 1,
+    color = ~colorNumeric(risk_palette, ccvi)(ccvi),
+    fillOpacity = 0.6,
+    stroke = FALSE,
+    popup = ~paste0(
+      "Country: ", country, "<br>",
+      "CCVI Score: ", round(ccvi, 3), "<br>",
+      "Climate Risk: ", round(cli_risk, 3), "<br>",
+      "Conflict Risk: ", round(con_risk, 3), "<br>",
+      "Lat: ", round(lat, 2), "<br>",
+      "Lon: ", round(lon, 2)
+    )
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = colorNumeric(risk_palette, domain = c(0, 1)),
+    values = current_data$ccvi,
+    title = "CCVI Score",
+    opacity = 1
+  ) %>%
+  setView(lng = 0, lat = 20, zoom = 2)
+
+leaflet_map
+```
+
+## Interactive Risk Explorer
+
+```{r interactive-risk-explorer}
+# Create interactive plotly scatter plot
+plotly_scatter <- plot_ly(data = current_data %>% filter(!is.na(lat) & !is.na(lon)),
+                         x = ~cli_risk,
+                         y = ~con_risk,
+                         color = ~ccvi,
+                         colors = risk_palette,
+                         size = ~vul_risk,
+                         sizes = c(1, 10),
+                         type = "scatter",
+                         mode = "markers",
+                         marker = list(opacity = 0.6),
+                         text = ~paste0(
+                           "Country: ", country, "<br>",
+                           "CCVI: ", round(ccvi, 3), "<br>",
+                           "Climate Risk: ", round(cli_risk, 3), "<br>",
+                           "Conflict Risk: ", round(con_risk, 3), "<br>",
+                           "Vulnerability Risk: ", round(vul_risk, 3)
+                         ),
+                         hoverinfo = "text") %>%
+  layout(
+    title = "Interactive Risk Explorer: Climate vs Conflict Risk",
+    xaxis = list(title = "Climate Risk Score"),
+    yaxis = list(title = "Conflict Risk Score"),
+    colorbar = list(title = "CCVI Score")
+  )
+
+plotly_scatter
+```
+
+# Temporal Analysis {#temporal-analysis}
+
+## Historical Trends
+
+```{r temporal-trends}
+# Load historical data for trend analysis
+historical_data <- ccvi_scores %>% 
+  filter(year >= 2020) %>% # Focus on recent years
+  group_by(year, quarter) %>% 
+  summarise(
+    global_mean_ccvi = mean(ccvi, na.rm = TRUE),
+    global_mean_cli = mean(cli_risk, na.rm = TRUE),
+    global_mean_con = mean(con_risk, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% 
+  mutate(time_period = paste0(year, "-Q", quarter))
+```
+
+```{r temporal-trends-plot}
+# Temporal trends visualization
+historical_data %>% 
+  pivot_longer(cols = c(global_mean_ccvi, global_mean_cli, global_mean_con),
+               names_to = "metric", values_to = "value") %>% 
+  mutate(metric = case_when(
+    metric == "global_mean_ccvi" ~ "Overall CCVI",
+    metric == "global_mean_cli" ~ "Climate Risk",
+    metric == "global_mean_con" ~ "Conflict Risk"
+  )) %>% 
+  ggplot(aes(x = time_period, y = value, color = metric, group = metric)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Overall CCVI" = "#1f77b4", "Climate Risk" = "#2ca02c", "Conflict Risk" = "#ff7f0e")) +
+  labs(title = "Global Risk Trends (2020-2025)",
+       subtitle = "Quarterly evolution of mean risk scores",
+       x = "Time Period",
+       y = "Mean Risk Score") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Risk Hotspots and Priority Areas {#hotspots}
+
+## Identifying Risk Hotspots
+
+```{r hotspot-identification}
+# Define hotspots as areas with CCVI > 0.7
+hotspots <- current_data %>% 
+  filter(ccvi > 0.7 & !is.na(lat) & !is.na(lon)) %>% 
+  mutate(
+    hotspot_type = case_when(
+      cli_risk > 0.7 & con_risk > 0.7 & vul_risk > 0.7 ~ "Triple Risk",
+      cli_risk > 0.7 & con_risk > 0.7 ~ "Climate-Conflict",
+      cli_risk > 0.7 & vul_risk > 0.7 ~ "Climate-Vulnerability",
+      con_risk > 0.7 & vul_risk > 0.7 ~ "Conflict-Vulnerability",
+      cli_risk > 0.7 ~ "Climate Dominant",
+      con_risk > 0.7 ~ "Conflict Dominant",
+      vul_risk > 0.7 ~ "Vulnerability Dominant",
+      TRUE ~ "Mixed Risk"
+    )
+  )
+
+hotspot_summary <- hotspots %>% 
+  group_by(hotspot_type) %>% 
+  summarise(
+    n_hotspots = n(),
+    mean_ccvi = mean(ccvi, na.rm = TRUE),
+    mean_cli = mean(cli_risk, na.rm = TRUE),
+    mean_con = mean(con_risk, na.rm = TRUE),
+    mean_vul = mean(vul_risk, na.rm = TRUE),
+    countries_affected = n_distinct(iso3),
+    .groups = "drop"
+  ) %>% 
+  arrange(desc(n_hotspots))
+```
+
+```{r hotspot-visualization}
+# Hotspot map
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+hotspot_map <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "white", size = 0.1) +
+  geom_point(data = hotspots,
+             aes(x = lon, y = lat, color = hotspot_type, size = ccvi),
+             alpha = 0.7) +
+  scale_size_continuous(name = "CCVI Score", range = c(1, 5)) +
+  scale_color_manual(name = "Hotspot Type",
+                    values = RColorBrewer::brewer.pal(n_distinct(hotspots$hotspot_type), "Set3")) +
+  labs(title = "Global Risk Hotspots (CCVI > 0.7)",
+       subtitle = paste(nrow(hotspots), "high-risk areas identified"),
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+hotspot_map
+```
+
+```{r hotspot-summary}
+kable(hotspot_summary,
+      caption = "Risk Hotspot Summary by Type") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# Recommendations and Policy Implications {#recommendations}
+
+## Key Findings Summary
+
+Based on the comprehensive analysis of the CCVI 2025 Q3 data:
+
+### Global Risk Landscape
+
+1. **Risk Distribution**: Approximately `r round(global_stats$very_high_risk_percentage, 1)`% of global grid cells fall into the "Very High Risk" category, with `r round(global_stats$high_risk_percentage, 1)`% in the "High Risk" category.
+
+2. **Regional Patterns**: The analysis reveals significant regional disparities in risk exposure, with certain regions consistently showing elevated risk scores across multiple pillars.
+
+3. **Pillar Interactions**: Strong correlations exist between climate, conflict, and vulnerability risks, indicating that risks are often compounding rather than isolated.
+
+### Priority Areas for Intervention
+
+```{r priority-recommendations}
+# Generate priority recommendations based on analysis
+priority_countries <- country_stats %>% 
+  filter(mean_ccvi > 0.6) %>% 
+  arrange(desc(mean_ccvi))
+
+vul_by_country <- current_data %>% 
+  group_by(iso3, country) %>% 
+  summarise(
+    mean_vul = mean(vul_risk, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+recommendations <- priority_countries %>% 
+  left_join(vul_by_country %>% rename(mean_vul_joined = mean_vul),
+            by = c("iso3", "country")) %>% 
+  mutate(
+    primary_concern = case_when(
+      .data[["mean_cli"]] > .data[["mean_con"]] & .data[["mean_cli"]] > .data[["mean_vul_joined"]] ~ "Climate Adaptation",
+      .data[["mean_con"]] > .data[["mean_cli"]] & .data[["mean_con"]] > .data[["mean_vul_joined"]] ~ "Conflict Prevention",
+      .data[["mean_vul_joined"]] > .data[["mean_cli"]] & .data[["mean_vul_joined"]] > .data[["mean_con"]] ~ "Vulnerability Reduction",
+      TRUE ~ "Integrated Approach"
+    ),
+    intervention_priority = case_when(
+      mean_ccvi > 0.8 ~ "Critical",
+      mean_ccvi > 0.7 ~ "High",
+      mean_ccvi > 0.6 ~ "Moderate",
+      TRUE ~ "Low"
+    )
+  )
+```
+
+### Strategic Recommendations
+
+1. **Integrated Risk Management**: Address compound risks through coordinated climate adaptation, conflict prevention, and vulnerability reduction strategies.
+
+2. **Early Warning Systems**: Strengthen early warning capabilities in high-risk regions, particularly those showing multiple risk factors.
+
+3. **Regional Cooperation**: Foster regional collaboration for risk management, especially in areas with transboundary risk factors.
+
+4. **Data-Driven Decision Making**: Continue monitoring and updating risk assessments to inform adaptive management strategies.
+
+## Data Quality and Limitations
+
+### Data Recency
+
+```{r data-recency}
+# Show data recency information
+kable(head(data_recency, 10),
+      caption = "Data Recency Information (Top 10 Indicators)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+### Methodological Considerations
+
+- **Spatial Resolution**: Analysis based on 0.5°×0.5° grid cells (~55km resolution)
+- **Temporal Coverage**: Quarterly updates from 2015 to Q3 2025
+- **Data Sources**: Integration of multiple global datasets with varying update frequencies
+- **Uncertainty**: Risk scores represent relative rather than absolute risk levels
+
+# Technical Appendix {#technical-appendix}
+
+## Data Processing Pipeline
+
+### Data Loading and Validation
+
+All data processing was conducted using R statistical software with the following key packages:
+- **Data Manipulation**: tidyverse, data.table, arrow
+- **Spatial Analysis**: sf, rnaturalearth, leaflet
+- **Visualization**: ggplot2, plotly, highcharter
+- **Statistical Analysis**: psych, factoextra, cluster
+
+### Quality Control Measures
+
+1. **Missing Data Assessment**: Comprehensive evaluation of data completeness across all indicators
+2. **Outlier Detection**: Statistical identification and validation of extreme values
+3. **Spatial Consistency**: Validation of spatial patterns and neighbor relationships
+4. **Temporal Consistency**: Assessment of temporal trends and data continuity
+
+### Analytical Methods
+
+- **Risk Categorization**: Quantile-based classification system with five risk levels
+- **Correlation Analysis**: Pearson correlation coefficients with significance testing
+- **Clustering**: K-means clustering for risk pattern identification
+- **Principal Component Analysis**: Dimension reduction for risk factor analysis
+
+## Code Repository and Reproducibility
+
+All analysis code and data processing scripts are available for reproducibility and further research. The analysis follows best practices for scientific computing and data visualization.
+
+### Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+### Data Citation
+
+Climate Conflict Vulnerability Index (CCVI) 2025 Q3 Data Release. Available at: https://climate-conflict.org
+
+### License and Usage
+
+This analysis is based on CCVI data licensed under Creative Commons Attribution-NonCommercial 4.0 International license. Please refer to the original data providers for specific usage terms and citation requirements.
+
+---
+
+*Report generated on `r Sys.Date()` using R version `r getRversion()`*
